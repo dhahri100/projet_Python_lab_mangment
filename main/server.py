@@ -1,61 +1,101 @@
-import socket
 import random
+import socket
 import string
+import threading
+import sqlite3
+import bcrypt
+
+SERVER_HOST = '127.0.0.1'
+SERVER_PORT = 12345
 
 
-# Function to generate a random password
-def generate_password(length=8):
-    characters = string.ascii_letters + string.digits
-    return ''.join(random.choice(characters) for _ in range(length))
+# Hash the password before saving
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+# Verify provided password with stored hashed password
+def verify_password(stored_password, provided_password):
+    return bcrypt.checkpw(provided_password.encode(), stored_password.encode())
+
+# Save credentials to the database
+def save_to_db(student_name, student_id, login_name, password):
+    conn = sqlite3.connect("clients.db")
+    cursor = conn.cursor()
+
+    try:
+        hashed_password = hash_password(password)
+        cursor.execute("INSERT INTO clients (student_name, student_id, login_name, password) VALUES (?, ?, ?, ?)",
+                       (student_name, student_id, login_name, hashed_password))
+        conn.commit()
+        print(f"Saved {login_name} to the database.")
+        return f"Registration successful. Login Name: {login_name}, Password: {password}"
+    except sqlite3.IntegrityError:
+        return f"Credentials for {login_name} already exist."
+    finally:
+        conn.close()
+
+# Authenticate an existing user
+def authenticate_user(login_name, provided_password):
+    conn = sqlite3.connect("clients.db")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT password FROM clients WHERE login_name = ?", (login_name,))
+    result = cursor.fetchone()
+    conn.close()
+
+    if result and verify_password(result[0], provided_password):
+        return "Authentication successful."
+    else:
+        return "Authentication failed."
+
+# Handle client connections
+def handle_client(client_socket, client_address):
+    print(f"Connection from {client_address} established.")
+    try:
+        while True:
+            data = client_socket.recv(1024).decode()
+            if not data:
+                break
+
+            try:
+                command, *args = data.split(',')
+
+                if command == "register" and len(args) == 2:
+                    student_name, student_id = args
+                    login_name = f"{student_name}@{student_id}"
+                    password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                    response = save_to_db(student_name, student_id, login_name, password)
+
+                elif command == "authenticate" and len(args) == 2:
+                    login_name, password = args
+                    response = authenticate_user(login_name, password)
+
+                else:
+                    response = "Invalid input. Use correct format."
+
+                client_socket.send(response.encode())
+
+            except ValueError:
+                client_socket.send("Invalid input. Use correct format.".encode())
+
+    except Exception as e:
+        print(f"Error when handling client {client_address}: {e}")
+    finally:
+        client_socket.close()
+        print(f"Connection with {client_address} closed.")
 
 
-# Main server function
+# Start the server
 def start_server():
-    # Create a socket object
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Server will run on localhost and port 12345
-    host = '127.0.0.1'  # Localhost (you can also use '0.0.0.0' for all available interfaces)
-    port = 12345  # Port to listen on
-
-    # Bind the server to the IP address and port
-    server_socket.bind((host, port))
-
-    # Start listening for incoming connections (max 5 clients in the waiting queue)
+    server_socket.bind((SERVER_HOST, SERVER_PORT))
     server_socket.listen(5)
-    print(f"Server listening on {host}:{port}...")
+    print(f"Server listening on {SERVER_HOST}:{SERVER_PORT}...")
 
     while True:
-        # Accept new client connections
-        client_socket, addr = server_socket.accept()
-        print(f"Connection established with {addr}")
-
-        try:
-            # Receive data from the client (maximum of 1024 bytes)
-            student_data = client_socket.recv(1024).decode()
-
-            if student_data:
-                # Split the student data (name, ID) based on a comma
-                student_name, student_id = student_data.split(',')
-
-                # Generate the login name by combining student name and ID
-                login_name = f"{student_name}@{student_id}"
-
-                # Generate a random password for the student
-                password = generate_password()
-
-                # Send back the login name and password to the client
-                response = f"Login Name: {login_name}, Password: {password}"
-                client_socket.send(response.encode())
-            else:
-                client_socket.send("Invalid input".encode())
-
-        except Exception as e:
-            print(f"Error: {e}")
-
-        finally:
-            # Close the client connection
-            client_socket.close()
+        client_socket, client_address = server_socket.accept()
+        client_thread = threading.Thread(target=handle_client, args=(client_socket, client_address))
+        client_thread.start()
 
 
 if __name__ == "__main__":
